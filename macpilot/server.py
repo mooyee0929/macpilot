@@ -135,7 +135,8 @@ def build_server() -> MCPServer[None]:
         (x,y) is the block centre in click coordinates. Much cheaper than a screenshot for
         reading logs, tables or finding a button. Scope with display+region, or app(+title)
         for one window; window results are window-relative (see the note). Default
-        languages favour Traditional Chinese then English; pass ["en-US"] for code/logs."""
+        languages favour Traditional Chinese then English; pass ["en-US"] for code/logs.
+        fast=True is quicker but garbles CJK text; only use it for English screens."""
         grab, note = _grab_target(display, region, app, title)
         boxes = ocr.recognize(grab.image, grab.width, grab.height, fast=fast, languages=languages)
         return f"{note}\n{len(boxes)} blocks\n{ocr.format_boxes(boxes)}"
