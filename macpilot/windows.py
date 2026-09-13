@@ -54,6 +54,17 @@ def list_windows(app: str | None = None) -> list[Window]:
     return out
 
 
+def find_window(app: str, title: str | None = None) -> Window:
+    """Largest on-screen window whose owner contains `app` (and title contains `title`)."""
+    matches = [
+        w for w in list_windows(app) if not title or title.lower() in w.title.lower()
+    ]
+    if not matches:
+        what = f"{app!r}" + (f" with title containing {title!r}" if title else "")
+        raise RuntimeError(f"no on-screen window for {what}")
+    return max(matches, key=lambda w: w.width * w.height)
+
+
 def _osascript(script: str) -> str:
     proc = subprocess.run(
         ["osascript", "-e", script], capture_output=True, text=True, timeout=15, check=False

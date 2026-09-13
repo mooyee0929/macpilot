@@ -8,6 +8,7 @@ authors = [{ name = "mooyee0929" }]
 dependencies = [
     "mcp>=2.0",
     "pyobjc-framework-Quartz>=10.0",
+    "pyobjc-framework-vision>=10.0",
 ]
 
 [project.optional-dependencies]

@@ -16,7 +16,7 @@ from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from macpilot import input as inp
-from macpilot import screen, windows
+from macpilot import ocr, screen, windows
 
 Mouse = Literal["left", "right", "middle"]
 
@@ -51,6 +51,37 @@ def _guarded(fn):  # type: ignore[no-untyped-def]
     return wrapper
 
 
+def _window_note(w: windows.Window) -> str:
+    d = screen.display_for_global(w.x, w.y)
+    if d is None:
+        return f"window origin ({int(w.x)},{int(w.y)}) is off every display"
+    lx, ly = d.to_local(w.x, w.y)
+    return (
+        f"window '{w.title}' of {w.app}, {int(w.width)}x{int(w.height)} points, on display "
+        f"#{d.index}; to click image point (px,py) use display={d.index}, "
+        f"x=px+{int(lx)}, y=py+{int(ly)}"
+    )
+
+
+def _grab_target(
+    display: int | None,
+    region: list[float] | None,
+    app: str | None,
+    title: str | None,
+) -> tuple[screen.Grab, str]:
+    if app:
+        w = windows.find_window(app, title)
+        return screen.grab_window(w.window_id, w.x, w.y, w.width, w.height), _window_note(w)
+    d = screen.get_display(display)
+    if region:
+        if len(region) != 4:
+            raise ToolError("region must be [x, y, width, height]")
+        rx, ry, rw, rh = region
+        note = f"region ({rx:g},{ry:g}) {rw:g}x{rh:g} on {_display_line(d)}; add ({rx:g},{ry:g})"
+        return screen.grab_display(d, (rx, ry, rw, rh)), note
+    return screen.grab_display(d), _display_line(d)
+
+
 def build_server() -> MCPServer[None]:
     server: MCPServer[None] = MCPServer(
         "macpilot",
@@ -80,6 +111,37 @@ def build_server() -> MCPServer[None]:
 
     @server.tool()
     @_guarded
+    def screenshot_window(
+        app: str, title: str | None = None, scale: float = 1.0
+    ) -> list[Image | str]:
+        """Capture one app's window by app name (largest match, or the one whose title
+        contains `title`), even if other windows cover it. The note tells you how to turn
+        image points into click coordinates."""
+        grab, note = _grab_target(None, None, app, title)
+        png, w, h = screen.encode(grab, scale=scale)
+        return [Image(data=png, format="png"), f"{note}; image {w}x{h}, multiplier {1 / scale:g}"]
+
+    @server.tool()
+    @_guarded
+    def read_text(
+        display: int | None = None,
+        region: list[float] | None = None,
+        app: str | None = None,
+        title: str | None = None,
+        fast: bool = False,
+        languages: list[str] | None = None,
+    ) -> str:
+        """OCR the screen and return one line per text block as "(x,y)<TAB>text", where
+        (x,y) is the block centre in click coordinates. Much cheaper than a screenshot for
+        reading logs, tables or finding a button. Scope with display+region, or app(+title)
+        for one window; window results are window-relative (see the note). Default
+        languages favour Traditional Chinese then English; pass ["en-US"] for code/logs."""
+        grab, note = _grab_target(display, region, app, title)
+        boxes = ocr.recognize(grab.image, grab.width, grab.height, fast=fast, languages=languages)
+        return f"{note}\n{len(boxes)} blocks\n{ocr.format_boxes(boxes)}"
+
+    @server.tool()
+    @_guarded
     def zoom(
         x: float, y: float, width: float, height: float, display: int | None = None
     ) -> list[Image | str]:
@@ -87,7 +149,7 @@ def build_server() -> MCPServer[None]:
         region's top-left in display points."""
         d = screen.get_display(display)
         png, w, h = screen.capture(d, region=(x, y, width, height), native=True)
-        note = f"region ({x},{y}) {width}x{height} points, image {w}x{h}"
+        note = f"region ({x:g},{y:g}) {width:g}x{height:g} points, image {w}x{h}"
         return [Image(data=png, format="png"), note]
 
     @server.tool()

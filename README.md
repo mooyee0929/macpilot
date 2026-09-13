@@ -20,6 +20,8 @@ the current state and triggers the system prompt if either is missing.
 | tool | what it does |
 | --- | --- |
 | `screenshot(display?, scale?)` | PNG of one display at its logical size; pixel = point |
+| `screenshot_window(app, title?)` | one window by app name, even when covered by others |
+| `read_text(display?, region?, app?, title?)` | OCR via Vision: `(x,y)<TAB>text` per block, centre = click point |
 | `zoom(x, y, w, h)` | native-resolution crop for reading small text |
 | `click(x, y, button?, count?)` | left/right/middle, single or double |
 | `move_mouse`, `drag`, `scroll` | pointer motion, drag-and-drop, wheel scrolling |
@@ -40,6 +42,8 @@ macpilot shot /tmp/s.png --scale 0.5
 macpilot click 640 400 --count 2
 macpilot type "hello 世界"
 macpilot key "cmd+l cmd+c"
+macpilot winshot /tmp/w.png Terminal
+macpilot ocr --app Terminal --lang en-US
 ```
 
 ## Development

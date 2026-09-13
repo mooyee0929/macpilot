@@ -5,6 +5,8 @@
     macpilot zoom out.png X Y W H
     macpilot click X Y [--button right] [--count 2]
     macpilot move X Y | drag X1 Y1 X2 Y2 | scroll X Y DY
+    macpilot winshot out.png APP [--title T]
+    macpilot ocr [--display N | --app APP [--title T] | --region X Y W H] [--fast]
     macpilot type "text" | key "cmd+c" | windows [APP] | front | open APP | perms
 """
 
@@ -17,7 +19,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from macpilot import input as inp
-from macpilot import screen, windows
+from macpilot import ocr, screen, windows
 
 
 def _display_arg(p: argparse.ArgumentParser) -> None:
@@ -50,6 +52,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("out", type=Path)
     for name in ("x", "y", "w", "h"):
         p.add_argument(name, type=float)
+    _display_arg(p)
+
+    p = sub.add_parser("winshot")
+    p.add_argument("out", type=Path)
+    p.add_argument("app")
+    p.add_argument("--title")
+    p.add_argument("--scale", type=float, default=1.0)
+
+    p = sub.add_parser("ocr")
+    p.add_argument("--app")
+    p.add_argument("--title")
+    p.add_argument("--region", type=float, nargs=4, metavar=("X", "Y", "W", "H"))
+    p.add_argument("--fast", action="store_true")
+    p.add_argument("--lang", nargs="+", help="e.g. --lang en-US")
     _display_arg(p)
 
     p = sub.add_parser("click")
@@ -116,6 +132,23 @@ def _run(args: argparse.Namespace) -> int:
         png, w, h = screen.capture(d, region=(args.x, args.y, args.w, args.h), native=True)
         args.out.write_bytes(png)
         print(f"{args.out} ({w}x{h})")
+    elif args.cmd == "winshot":
+        w = windows.find_window(args.app, args.title)
+        grab = screen.grab_window(w.window_id, w.x, w.y, w.width, w.height)
+        png, pw, ph = screen.encode(grab, scale=args.scale)
+        args.out.write_bytes(png)
+        print(f"{w.app} '{w.title}' at global ({int(w.x)},{int(w.y)}) -> {args.out} ({pw}x{ph})")
+    elif args.cmd == "ocr":
+        if args.app:
+            w = windows.find_window(args.app, args.title)
+            grab = screen.grab_window(w.window_id, w.x, w.y, w.width, w.height)
+        else:
+            d = screen.get_display(args.display)
+            grab = screen.grab_display(d, tuple(args.region) if args.region else None)
+        boxes = ocr.recognize(
+            grab.image, grab.width, grab.height, fast=args.fast, languages=args.lang
+        )
+        print(ocr.format_boxes(boxes))
     elif args.cmd == "click":
         gx, gy = _global(args.display, args.x, args.y)
         inp.click(gx, gy, button=args.button, count=args.count)
