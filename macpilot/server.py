@@ -13,6 +13,7 @@ from dataclasses import asdict
 from typing import Literal
 
 from mcp.server.mcpserver import Image, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from macpilot import input as inp
 from macpilot import screen, windows
@@ -31,9 +32,23 @@ def _display_line(d: screen.Display) -> str:
 def _global(display: int | None, x: float, y: float) -> tuple[screen.Display, float, float]:
     d = screen.get_display(display)
     if not d.contains(x, y):
-        raise ValueError(f"({x},{y}) is outside {_display_line(d)}")
+        raise ToolError(f"({x},{y}) is outside {_display_line(d)}")
     gx, gy = d.to_global(x, y)
     return d, gx, gy
+
+
+def _guarded(fn):  # type: ignore[no-untyped-def]
+    """Turn our RuntimeErrors into ToolErrors so the message reaches the client."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):  # type: ignore[no-untyped-def]
+        try:
+            return fn(*args, **kwargs)
+        except (screen.ScreenError, inp.InputError, RuntimeError, ValueError) as exc:
+            raise ToolError(str(exc)) from exc
+
+    return wrapper
 
 
 def build_server() -> MCPServer[None]:
@@ -48,11 +63,13 @@ def build_server() -> MCPServer[None]:
     )
 
     @server.tool()
+    @_guarded
     def list_displays() -> str:
         """List connected displays with index, logical size, origin and scale factor."""
         return "\n".join(_display_line(d) for d in screen.list_displays())
 
     @server.tool()
+    @_guarded
     def screenshot(display: int | None = None, scale: float = 1.0) -> list[Image | str]:
         """Capture one display (default main). Image pixels map 1:1 to click coordinates
         when scale is 1.0; use scale 0.5 for a cheaper overview (then multiply coords by 2)."""
@@ -62,6 +79,7 @@ def build_server() -> MCPServer[None]:
         return [Image(data=png, format="png"), note]
 
     @server.tool()
+    @_guarded
     def zoom(
         x: float, y: float, width: float, height: float, display: int | None = None
     ) -> list[Image | str]:
@@ -73,6 +91,7 @@ def build_server() -> MCPServer[None]:
         return [Image(data=png, format="png"), note]
 
     @server.tool()
+    @_guarded
     def click(
         x: float, y: float, button: Mouse = "left", count: int = 1, display: int | None = None
     ) -> str:
@@ -83,6 +102,7 @@ def build_server() -> MCPServer[None]:
         return f"clicked {button} x{count} at ({x},{y})"
 
     @server.tool()
+    @_guarded
     def move_mouse(x: float, y: float, display: int | None = None) -> str:
         """Move the pointer without clicking (hover menus, tooltips)."""
         _, gx, gy = _global(display, x, y)
@@ -90,6 +110,7 @@ def build_server() -> MCPServer[None]:
         return f"moved to ({x},{y})"
 
     @server.tool()
+    @_guarded
     def drag(x1: float, y1: float, x2: float, y2: float, display: int | None = None) -> str:
         """Press at (x1,y1), drag to (x2,y2), release."""
         _, g1x, g1y = _global(display, x1, y1)
@@ -98,6 +119,7 @@ def build_server() -> MCPServer[None]:
         return f"dragged ({x1},{y1}) -> ({x2},{y2})"
 
     @server.tool()
+    @_guarded
     def scroll(x: float, y: float, dy: int = -5, dx: int = 0, display: int | None = None) -> str:
         """Scroll the element under (x,y) by lines. dy<0 scrolls down (see more below),
         dy>0 scrolls up."""
@@ -106,6 +128,7 @@ def build_server() -> MCPServer[None]:
         return f"scrolled dy={dy} dx={dx} at ({x},{y})"
 
     @server.tool()
+    @_guarded
     def type_text(text: str, delay_ms: int = 12) -> str:
         """Type Unicode text into the focused field (CJK works). Newlines become Return.
         Click the field first."""
@@ -113,6 +136,7 @@ def build_server() -> MCPServer[None]:
         return f"typed {n} characters into {windows.frontmost_app()}"
 
     @server.tool()
+    @_guarded
     def press_key(keys: str) -> str:
         """Press one chord: "enter", "tab", "esc", "cmd+c", "cmd+shift+t", "ctrl+left".
         Separate several chords with spaces to press them in sequence."""
@@ -124,17 +148,20 @@ def build_server() -> MCPServer[None]:
         return "pressed " + ", ".join(pressed) + f" in {windows.frontmost_app()}"
 
     @server.tool()
+    @_guarded
     def list_windows(app: str | None = None) -> str:
         """List on-screen windows (app, title, bounds in global points). Filter by app name."""
         wins = windows.list_windows(app)
         return json.dumps([asdict(w) for w in wins], ensure_ascii=False, indent=1)
 
     @server.tool()
+    @_guarded
     def frontmost_app() -> str:
         """Name of the app that currently has keyboard focus."""
         return windows.frontmost_app()
 
     @server.tool()
+    @_guarded
     def open_app(name: str) -> str:
         """Launch or bring to front an app by name (e.g. "Safari", "Finder", "Terminal").
         Waits until it actually has focus before returning."""
@@ -144,12 +171,14 @@ def build_server() -> MCPServer[None]:
         return f"{name} is frontmost"
 
     @server.tool()
+    @_guarded
     def open_url(url: str) -> str:
         """Open a URL or file path with the default handler."""
         windows.open_url(url)
         return f"opened {url}"
 
     @server.tool()
+    @_guarded
     def wait(seconds: float = 1.0) -> str:
         """Sleep so animations, page loads or app launches can finish (max 10s)."""
         s = max(0.0, min(seconds, 10.0))
@@ -157,6 +186,7 @@ def build_server() -> MCPServer[None]:
         return f"waited {s:g}s"
 
     @server.tool()
+    @_guarded
     def permissions() -> str:
         """Report whether Screen Recording and Accessibility are granted; request them if not."""
         cap = screen.has_screen_capture_access() or screen.request_screen_capture_access()
