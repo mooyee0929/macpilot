@@ -15,8 +15,8 @@ from typing import Literal
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
+from macpilot import ax, ocr, screen, windows
 from macpilot import input as inp
-from macpilot import ocr, screen, windows
 
 Mouse = Literal["left", "right", "middle"]
 
@@ -156,13 +156,25 @@ def build_server() -> MCPServer[None]:
     @server.tool()
     @_guarded
     def click(
-        x: float, y: float, button: Mouse = "left", count: int = 1, display: int | None = None
+        x: float,
+        y: float,
+        button: Mouse = "left",
+        count: int = 1,
+        display: int | None = None,
+        mode: ax.Mode = "auto",
     ) -> str:
         """Click at a display-relative point. count=2 double-clicks; button="right" opens
-        a context menu."""
+        a context menu. mode="auto" (default) asks the accessible element under the point
+        to perform the click (AXPress etc.) so the real pointer is not moved, and only
+        falls back to a CGEvent click when nothing pressable is there; mode="ax" never
+        falls back (errors instead); mode="cgevent" always moves the pointer. The result
+        says which path was used."""
         _, gx, gy = _global(display, x, y)
-        inp.click(gx, gy, button=button, count=count)
-        return f"clicked {button} x{count} at ({x},{y})"
+        out = ax.click(
+            ax.system_layer(), mode, gx, gy, button, count,
+            lambda: inp.click(gx, gy, button=button, count=count),
+        )
+        return f"clicked {button} x{count} at ({x},{y}); {out.note()}"
 
     @server.tool()
     @_guarded
@@ -192,23 +204,39 @@ def build_server() -> MCPServer[None]:
 
     @server.tool()
     @_guarded
-    def type_text(text: str, delay_ms: int = 12) -> str:
-        """Type Unicode text into the focused field (CJK works). Newlines become Return.
-        Click the field first."""
-        n = inp.type_text(text, delay=delay_ms / 1000)
-        return f"typed {n} characters into {windows.frontmost_app()}"
+    def type_text(
+        text: str, delay_ms: int = 12, mode: ax.Mode = "auto", app: str | None = None
+    ) -> str:
+        """Type Unicode text into the focused field (CJK works). Click the field first.
+        mode="auto" (default) inserts the text through the Accessibility API into the
+        focused element (no key events, the user keeps the keyboard) and falls back to
+        typing key events into the frontmost app when the field is not AX-writable;
+        mode="ax" never falls back; mode="cgevent" always sends key events, where
+        newlines become Return. app="Notes" targets that app's focused field even when
+        it is in the background (AX only; no fallback unless it is frontmost)."""
+        pid = ax.pid_for_app(app) if app else None
+        out = ax.type_text(
+            ax.system_layer(), mode, text, pid, ax.frontmost_pid(),
+            lambda: inp.type_text(text, delay=delay_ms / 1000),
+        )
+        target = app if app else windows.frontmost_app()
+        return f"typed {len(text)} characters into {target}; {out.note()}"
 
     @server.tool()
     @_guarded
     def press_key(keys: str) -> str:
         """Press one chord: "enter", "tab", "esc", "cmd+c", "cmd+shift+t", "ctrl+left".
-        Separate several chords with spaces to press them in sequence."""
+        Separate several chords with spaces to press them in sequence. Chords are always
+        real key events delivered to the frontmost app (there is no AX equivalent)."""
         pressed = []
         for spec in keys.split():
             chord = inp.press(spec)
             pressed.append(chord.name)
             time.sleep(0.05)
-        return "pressed " + ", ".join(pressed) + f" in {windows.frontmost_app()}"
+        return (
+            "pressed " + ", ".join(pressed) + f" in {windows.frontmost_app()}; "
+            "path=cgevent; real key events were sent to the frontmost app"
+        )
 
     @server.tool()
     @_guarded
@@ -253,8 +281,8 @@ def build_server() -> MCPServer[None]:
     def permissions() -> str:
         """Report whether Screen Recording and Accessibility are granted; request them if not."""
         cap = screen.has_screen_capture_access() or screen.request_screen_capture_access()
-        ax = inp.has_input_access() or inp.request_input_access()
-        return json.dumps({"screen_recording": cap, "accessibility": ax})
+        access = inp.has_input_access() or inp.request_input_access()
+        return json.dumps({"screen_recording": cap, "accessibility": access})
 
     return server
 

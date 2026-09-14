@@ -3,11 +3,12 @@
     macpilot displays
     macpilot shot out.png [--display N] [--scale 0.5]
     macpilot zoom out.png X Y W H
-    macpilot click X Y [--button right] [--count 2]
+    macpilot click X Y [--button right] [--count 2] [--mode auto|ax|cgevent]
     macpilot move X Y | drag X1 Y1 X2 Y2 | scroll X Y DY
     macpilot winshot out.png APP [--title T]
     macpilot ocr [--display N | --app APP [--title T] | --region X Y W H] [--fast]
-    macpilot type "text" | key "cmd+c" | windows [APP] | front | open APP | perms
+    macpilot type "text" [--mode auto|ax|cgevent] [--app APP]
+    macpilot key "cmd+c" | windows [APP] | front | open APP | perms
 """
 
 from __future__ import annotations
@@ -18,8 +19,8 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
+from macpilot import ax, ocr, screen, windows
 from macpilot import input as inp
-from macpilot import ocr, screen, windows
 
 
 def _display_arg(p: argparse.ArgumentParser) -> None:
@@ -73,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("y", type=float)
     p.add_argument("--button", choices=["left", "right", "middle"], default="left")
     p.add_argument("--count", type=int, default=1)
+    p.add_argument("--mode", choices=list(ax.MODES), default="auto")
     _display_arg(p)
 
     p = sub.add_parser("move")
@@ -94,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("type")
     p.add_argument("text")
+    p.add_argument("--mode", choices=list(ax.MODES), default="auto")
+    p.add_argument("--app", help="type into this app's focused field via AX, even in background")
 
     p = sub.add_parser("key")
     p.add_argument("keys")
@@ -118,8 +122,8 @@ def _run(args: argparse.Namespace) -> int:
             print(json.dumps(asdict(d)))
     elif args.cmd == "perms":
         cap = screen.has_screen_capture_access() or screen.request_screen_capture_access()
-        ax = inp.has_input_access() or inp.request_input_access()
-        print(json.dumps({"screen_recording": cap, "accessibility": ax}))
+        access = inp.has_input_access() or inp.request_input_access()
+        print(json.dumps({"screen_recording": cap, "accessibility": access}))
     elif args.cmd == "front":
         print(windows.frontmost_app())
     elif args.cmd == "shot":
@@ -151,8 +155,11 @@ def _run(args: argparse.Namespace) -> int:
         print(ocr.format_boxes(boxes))
     elif args.cmd == "click":
         gx, gy = _global(args.display, args.x, args.y)
-        inp.click(gx, gy, button=args.button, count=args.count)
-        print(f"clicked {args.button} x{args.count} at ({args.x},{args.y})")
+        out = ax.click(
+            ax.system_layer(), args.mode, gx, gy, args.button, args.count,
+            lambda: inp.click(gx, gy, button=args.button, count=args.count),
+        )
+        print(f"clicked {args.button} x{args.count} at ({args.x},{args.y}); {out.note()}")
     elif args.cmd == "move":
         gx, gy = _global(args.display, args.x, args.y)
         inp.move(gx, gy)
@@ -164,7 +171,13 @@ def _run(args: argparse.Namespace) -> int:
         gx, gy = _global(args.display, args.x, args.y)
         inp.scroll(gx, gy, dx=args.dx, dy=args.dy)
     elif args.cmd == "type":
-        print(f"typed {inp.type_text(args.text)} chars into {windows.frontmost_app()}")
+        pid = ax.pid_for_app(args.app) if args.app else None
+        out = ax.type_text(
+            ax.system_layer(), args.mode, args.text, pid, ax.frontmost_pid(),
+            lambda: inp.type_text(args.text),
+        )
+        target = args.app if args.app else windows.frontmost_app()
+        print(f"typed {len(args.text)} chars into {target}; {out.note()}")
     elif args.cmd == "key":
         for spec in args.keys.split():
             print(f"pressed {inp.press(spec).name}")
