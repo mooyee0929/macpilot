@@ -14,7 +14,7 @@ with a fake layer.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Literal, Protocol
@@ -25,6 +25,8 @@ Path = Literal["ax", "cgevent"]
 
 # AXError.h values we branch on.
 AX_SUCCESS = 0
+AX_INVALID_ELEMENT = -25202
+AX_CANNOT_COMPLETE = -25204
 
 # Actions to try for each (button, click count), first supported one wins.
 CLICK_ACTIONS: dict[tuple[str, int], tuple[str, ...]] = {
@@ -43,6 +45,12 @@ SINGLE_LINE_ROLES = frozenset({"AXTextField", "AXComboBox", "AXSearchField"})
 MULTI_LINE_ROLES = frozenset({"AXTextArea"})
 
 _AX_FRAMEWORK = "/System/Library/Frameworks/ApplicationServices.framework"
+MESSAGING_TIMEOUT = 3.0
+# Electron builds its tree when AXManualAccessibility is set. Chromium browsers only react to
+# AXEnhancedUserInterface (the VoiceOver flag), which changes window animation behaviour in
+# native apps, so it is set only where the caller knows the app is Chromium.
+MANUAL_ACCESSIBILITY = "AXManualAccessibility"
+ENHANCED_USER_INTERFACE = "AXEnhancedUserInterface"
 
 
 class AXError(RuntimeError):
@@ -107,7 +115,8 @@ def describe(layer: AXLayer, el: Any) -> str:
     return str(role)
 
 
-def _find_action(layer: AXLayer, el: Any, wanted: tuple[str, ...]) -> tuple[Any, str] | None:
+def find_action(layer: AXLayer, el: Any, wanted: tuple[str, ...]) -> tuple[Any, str] | None:
+    """`el` or the nearest ancestor (bounded) that supports one of `wanted`, with the action."""
     node = el
     for _ in range(ANCESTOR_DEPTH + 1):
         if node is None:
@@ -132,7 +141,7 @@ def ax_click(
     el = layer.element_at(gx, gy)
     if el is None:
         return False, f"no accessible element at global ({gx:g},{gy:g})"
-    found = _find_action(layer, el, wanted)
+    found = find_action(layer, el, wanted)
     if found is None:
         return False, f"{describe(layer, el)} supports none of {'/'.join(wanted)}"
     target, action = found
@@ -185,6 +194,11 @@ def ax_type(layer: AXLayer, text: str, pid: int | None) -> tuple[bool, str]:
     if el is None:
         where = f"pid {pid}" if pid is not None else "the frontmost app"
         return False, f"{where} has no focused element"
+    return type_into(layer, el, text)
+
+
+def type_into(layer: AXLayer, el: Any, text: str) -> tuple[bool, str]:
+    """Insert `text` into one specific element through AX."""
     role = layer.attribute(el, "AXRole")
     what = describe(layer, el)
     if "\n" in text and role not in MULTI_LINE_ROLES:
@@ -271,9 +285,16 @@ def _load_bridge() -> SimpleNamespace:
             ("AXUIElementIsAttributeSettable", b"i" + el + b"@o^Z"),
             ("AXUIElementPerformAction", b"i" + el + b"@"),
             ("AXUIElementCopyActionNames", b"i" + el + b"o^@"),
+            ("AXUIElementCopyMultipleAttributeValues", b"i" + el + b"@Io^@"),
+            ("AXUIElementSetMessagingTimeout", b"i" + el + b"f"),
         ],
     )
     return SimpleNamespace(**ns)
+
+
+def _plain(value: Any) -> Any | None:
+    """Drop AXValueRef wrappers (geometry, ranges and per-attribute errors)."""
+    return None if type(value).__name__ == "AXValueRef" else value
 
 
 class SystemAX:
@@ -310,7 +331,34 @@ class SystemAX:
 
     def attribute(self, el: Any, name: str) -> Any | None:
         err, value = self._fn.AXUIElementCopyAttributeValue(el, name, None)
-        return value if err == AX_SUCCESS else None
+        return _plain(value) if err == AX_SUCCESS else None
+
+    def attributes(self, el: Any, names: Sequence[str]) -> dict[str, Any]:
+        """Several attributes in one round trip; unsupported ones come back as None."""
+        err, values = self._fn.AXUIElementCopyMultipleAttributeValues(el, list(names), 0, None)
+        if err != AX_SUCCESS or values is None:
+            return {}
+        return {name: _plain(value) for name, value in zip(names, values, strict=False)}
+
+    def app_element(self, pid: int) -> Any:
+        app = self._fn.AXUIElementCreateApplication(pid)
+        # An unresponsive app would otherwise block every call for the 6 s default.
+        self._fn.AXUIElementSetMessagingTimeout(app, MESSAGING_TIMEOUT)
+        return app
+
+    def enable_full_tree(self, pid: int, chromium: bool) -> str | None:
+        """Ask an Electron / Chromium app to build the accessibility tree it skips by default.
+
+        Returns the attribute that was newly switched on, or None when nothing changed.
+        """
+        app = self.app_element(pid)
+        names = (ENHANCED_USER_INTERFACE,) if chromium else (MANUAL_ACCESSIBILITY,)
+        for name in names:
+            if self.attribute(app, name) is True:
+                return None
+            if self.set_attribute(app, name, True):
+                return name
+        return None
 
     def is_settable(self, el: Any, name: str) -> bool:
         err, ok = self._fn.AXUIElementIsAttributeSettable(el, name, None)
@@ -326,7 +374,11 @@ class SystemAX:
         return [str(n) for n in names]
 
     def perform(self, el: Any, action: str) -> bool:
-        return bool(self._fn.AXUIElementPerformAction(el, action) == AX_SUCCESS)
+        return self.perform_status(el, action) == AX_SUCCESS
+
+    def perform_status(self, el: Any, action: str) -> int:
+        """Raw AXError of the action, so callers can tell a refusal from a timeout."""
+        return int(self._fn.AXUIElementPerformAction(el, action))
 
 
 _layer: SystemAX | None = None
@@ -339,29 +391,76 @@ def system_layer() -> SystemAX:
     return _layer
 
 
-def frontmost_pid() -> int | None:
+@dataclass(frozen=True)
+class RunningApp:
+    pid: int
+    name: str
+    regular: bool
+    active: bool
+
+
+def match_app(name: str, apps: Sequence[RunningApp]) -> int:
+    """PID of the app called `name`: an exact name wins, otherwise a unique substring match.
+    Regular (Dock) apps are preferred over helpers that share a name."""
+    needle = name.strip().lower()
+    ordered = sorted(apps, key=lambda a: (not a.regular, a.pid))
+    for app in ordered:
+        if app.name.lower() == needle:
+            return app.pid
+    partial = [a for a in ordered if needle and needle in a.name.lower()]
+    if len(partial) == 1:
+        return partial[0].pid
+    if partial:
+        names = ", ".join(sorted({a.name for a in partial}))
+        raise RuntimeError(f"{name!r} matches several running apps: {names}")
+    raise RuntimeError(f"no running app named {name!r}")
+
+
+def _all_pids() -> list[int]:
+    import ctypes
+
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+    count = int(libproc.proc_listallpids(None, 0))
+    if count <= 0:
+        raise RuntimeError("proc_listallpids failed")
+    buffer = (ctypes.c_int * (count + 64))()
+    filled = int(libproc.proc_listallpids(buffer, ctypes.sizeof(buffer)))
+    return [pid for pid in buffer[: max(filled, 0)] if pid > 0]
+
+
+def running_apps() -> list[RunningApp]:
+    """Every app LaunchServices knows about right now.
+
+    ``NSWorkspace.runningApplications`` and ``frontmostApplication`` are caches that only
+    refresh while the main run loop spins. A long-lived server never spins it, so an app
+    launched after the first lookup would stay invisible and the frontmost app would never
+    change. Asking for each pid individually is always current and costs a few milliseconds.
+    """
     import AppKit
 
-    app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
-    return int(app.processIdentifier()) if app is not None else None
+    apps: list[RunningApp] = []
+    for pid in _all_pids():
+        app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        if app is None:
+            continue
+        apps.append(
+            RunningApp(
+                pid=pid,
+                name=str(app.localizedName() or ""),
+                regular=int(app.activationPolicy()) == 0,
+                active=bool(app.isActive()),
+            )
+        )
+    return apps
+
+
+def frontmost_pid() -> int | None:
+    for app in running_apps():
+        if app.active:
+            return app.pid
+    return None
 
 
 def pid_for_app(name: str) -> int:
     """PID of a running app whose name contains `name` (exact match preferred)."""
-    import AppKit
-
-    apps = AppKit.NSWorkspace.sharedWorkspace().runningApplications()
-    needle = name.lower()
-    partial: list[tuple[str, int]] = []
-    for app in apps:
-        label = str(app.localizedName() or "")
-        if label.lower() == needle:
-            return int(app.processIdentifier())
-        if needle in label.lower():
-            partial.append((label, int(app.processIdentifier())))
-    if len(partial) == 1:
-        return partial[0][1]
-    if partial:
-        names = ", ".join(sorted(label for label, _ in partial))
-        raise RuntimeError(f"{name!r} matches several running apps: {names}")
-    raise RuntimeError(f"no running app named {name!r}")
+    return match_app(name, running_apps())

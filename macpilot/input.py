@@ -138,6 +138,29 @@ def press(spec: str, hold: float = 0.02) -> KeyChord:
     return chord
 
 
+def press_to_pid(pid: int, chord: KeyChord, hold: float = 0.02) -> None:
+    """Deliver a chord to one process. The frontmost app and the user's keyboard focus are
+    not involved; the target handles it with whatever element it has focused."""
+    _check()
+    Quartz.CGEventPostToPid(pid, _key_event(chord.keycode, True, chord.flags))
+    time.sleep(hold)
+    Quartz.CGEventPostToPid(pid, _key_event(chord.keycode, False, chord.flags))
+
+
+def type_to_pid(pid: int, text: str, delay: float = 0.012) -> None:
+    """Type Unicode text as key events delivered to one process; newlines become Return."""
+    _check()
+    for ch in text:
+        if ch == "\n":
+            press_to_pid(pid, parse_chord("return"))
+        else:
+            for down in (True, False):
+                ev = _key_event(0, down)
+                Quartz.CGEventKeyboardSetUnicodeString(ev, len(ch.encode("utf-16-le")) // 2, ch)
+                Quartz.CGEventPostToPid(pid, ev)
+        time.sleep(delay)
+
+
 def type_text(text: str, delay: float = 0.012) -> int:
     """Type arbitrary Unicode text, one character per key event pair.
 

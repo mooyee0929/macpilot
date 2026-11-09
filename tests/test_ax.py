@@ -4,7 +4,17 @@ from typing import Any
 
 import pytest
 
-from macpilot.ax import AXError, Outcome, ax_click, ax_type, click, parse_mode, type_text
+from macpilot.ax import (
+    AXError,
+    Outcome,
+    RunningApp,
+    ax_click,
+    ax_type,
+    click,
+    match_app,
+    parse_mode,
+    type_text,
+)
 
 
 class Element:
@@ -313,3 +323,42 @@ def test_type_ax_mode_raises() -> None:
     with pytest.raises(AXError, match="no focused element"):
         type_text(layer, "ax", "hi", None, 42, fb)
     assert fb.calls == 0
+
+
+# --- finding a running app ---------------------------------------------------------------
+
+
+def _apps() -> list[RunningApp]:
+    return [
+        RunningApp(410, "Google Chrome Helper", regular=False, active=False),
+        RunningApp(400, "Google Chrome", regular=True, active=True),
+        RunningApp(300, "Notes", regular=True, active=False),
+        RunningApp(310, "Notes", regular=False, active=False),
+        RunningApp(500, "Code", regular=True, active=False),
+        RunningApp(510, "Code Helper (Renderer)", regular=False, active=False),
+        RunningApp(520, "Code Helper (GPU)", regular=False, active=False),
+    ]
+
+
+def test_match_app_prefers_an_exact_name_over_substrings() -> None:
+    assert match_app("google chrome", _apps()) == 400
+    assert match_app(" Code ", _apps()) == 500
+
+
+def test_match_app_prefers_the_regular_app_among_same_named_processes() -> None:
+    assert match_app("Notes", _apps()) == 300
+
+
+def test_match_app_accepts_a_unique_substring() -> None:
+    assert match_app("renderer", _apps()) == 510
+
+
+def test_match_app_refuses_an_ambiguous_substring() -> None:
+    with pytest.raises(RuntimeError, match="matches several running apps: Code Helper"):
+        match_app("helper (", _apps())
+
+
+@pytest.mark.parametrize("name", ["Safari", "", "  "])
+def test_match_app_reports_an_app_that_is_not_running(name: str) -> None:
+    with pytest.raises(RuntimeError, match="no running app named"):
+        match_app(name, _apps())
