@@ -9,18 +9,28 @@
     macpilot ocr [--display N | --app APP [--title T] | --region X Y W H] [--fast]
     macpilot type "text" [--mode auto|ax|cgevent] [--app APP]
     macpilot key "cmd+c" | windows [APP] | front | open APP | perms
+    macpilot snapshot APP [--skeleton] [-i] [--menubar] [--depth N] [--max-nodes N]
+    macpilot find APP QUERY [--role ROLE]
+    macpilot claims
+    macpilot fleet PLAN.toml [--dry-run]
+
+snapshot and find read an app's accessibility tree without claiming it; refs only live inside
+a running MCP server, so the CLI is for looking, not acting.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from macpilot import ax, ocr, screen, windows
+from macpilot import ax, fleet, ocr, screen, windows
 from macpilot import input as inp
+from macpilot.desk import Desk, SystemApps
+from macpilot.session import AgentConfig, Claims
 
 
 def _display_arg(p: argparse.ArgumentParser) -> None:
@@ -108,6 +118,25 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("open")
     p.add_argument("name")
 
+    p = sub.add_parser("snapshot", help="print an app's accessibility tree")
+    p.add_argument("app")
+    p.add_argument("--skeleton", action="store_true", help="top 3 levels only")
+    p.add_argument("-i", "--interactive-only", action="store_true")
+    p.add_argument("--menubar", action="store_true", help="read the menu bar, not the windows")
+    p.add_argument("--depth", type=int, default=None)
+    p.add_argument("--max-nodes", type=int, default=300)
+
+    p = sub.add_parser("find", help="search an app's accessibility tree")
+    p.add_argument("app")
+    p.add_argument("query")
+    p.add_argument("--role")
+
+    sub.add_parser("claims", help="which agent is driving which app")
+
+    p = sub.add_parser("fleet", help="run several headless agents from a TOML plan")
+    p.add_argument("plan", type=Path)
+    p.add_argument("--dry-run", action="store_true", help="validate and print, start nothing")
+
     args = parser.parse_args(argv)
     try:
         return _run(args)
@@ -186,7 +215,49 @@ def _run(args: argparse.Namespace) -> int:
             print(json.dumps(asdict(w), ensure_ascii=False))
     elif args.cmd == "open":
         print(f"frontmost: {windows.activate_app(args.name)}")
+    elif args.cmd == "snapshot":
+        print(_observer().snapshot(
+            args.app,
+            surface="menubar" if args.menubar else "windows",
+            skeleton=args.skeleton,
+            depth=args.depth,
+            interactive_only=args.interactive_only,
+            max_nodes=args.max_nodes,
+        ))
+    elif args.cmd == "find":
+        print(_observer().find(args.app, query=args.query, role=args.role))
+    elif args.cmd == "claims":
+        config = AgentConfig.from_env(os.environ, os.getpid())
+        rows = Claims(config.home / "claims", config.agent).all()
+        for c in rows:
+            print(json.dumps(asdict(c), ensure_ascii=False))
+        if not rows:
+            print("no app is claimed")
+    elif args.cmd == "fleet":
+        return _fleet(args.plan, args.dry_run)
     return 0
+
+
+def _observer() -> Desk:
+    return Desk(ax.system_layer(), SystemApps(), None)
+
+
+def _fleet(plan: Path, dry_run: bool) -> int:
+    specs = fleet.load_plan(plan)
+    config = AgentConfig.from_env(os.environ, os.getpid())
+    if dry_run:
+        for spec in specs:
+            print(f"{spec.name}: apps={', '.join(spec.apps)} model={spec.model or 'default'} "
+                  f"timeout={spec.timeout:g}s")
+        return 0
+    run_dir = fleet.new_run_dir(config.home)
+    print(f"starting {len(specs)} agents; logs and traces in {run_dir}", flush=True)
+    results = fleet.run_plan(
+        specs, run_dir, home=config.home,
+        on_done=lambda r: print(fleet.format_result(r) + "\n", flush=True),
+    )
+    print(f"{len(results)} agents: {fleet.tally(results)}")
+    return 0 if all(r.ok for r in results) else 1
 
 
 if __name__ == "__main__":

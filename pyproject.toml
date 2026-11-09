@@ -1,7 +1,7 @@
 [project]
 name = "macpilot"
 version = "0.1.0"
-description = "macOS computer-use MCP server: full-screen screenshots plus mouse and keyboard control for Claude Code."
+description = "macOS computer-use MCP server for Claude Code: accessibility-tree snapshots with ref actions for headless multi-agent use, plus screenshots and mouse and keyboard control."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "mooyee0929" }]
